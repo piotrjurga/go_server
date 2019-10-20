@@ -3,47 +3,348 @@
 #include "imgui_impl_opengl3.h"
 #include <stdio.h>
 #include <SDL.h>
+#include <bitset>
+#include <queue>
+#include <unordered_map>
+#include <vector>
 
 #include <GL/gl3w.h>
 
-inline bool IsInside(ImVec2 p, ImVec4 rect) {
+#include <stdint.h>
+
+#define MAX_BOARD_SIZE 19
+
+struct v2 {
+    union {
+        struct {
+            int32_t x;
+            int32_t y;
+        };
+        int64_t all;
+    };
+};
+
+struct v2_8 { int8_t x; int8_t y; };
+
+enum Stone {
+    STONE_NONE  = 0b00,
+    STONE_BLACK = 0b01,
+    STONE_WHITE = 0b11,
+};
+
+inline Stone other_stone_color(Stone s) {
+    assert(s & 0b01);
+    return (Stone)(s ^ 0b10);
+}
+
+struct Board {
+    std::bitset<384> stones;
+    std::bitset<384> colors;
+    int32_t size;
+
+    Stone stone(int i, int j);
+    void set(int i, int j, Stone s);
+    std::vector<v2> get_group(int x, int y);
+    int count_liberties(std::vector<v2> group);
+};
+
+Stone Board::stone(int i, int j) {
+    assert(i >= 0 && i < size);
+    assert(j >= 0 && j < size);
+
+    uint32_t stone_bit = stones[i*size + j] != 0;
+    uint32_t color_bit = colors[i*size + j] != 0;
+    uint32_t result = stone_bit | (color_bit << 1);
+    return (Stone)result;
+}
+
+void Board::set(int i, int j, Stone s) {
+    assert(i >= 0 && i < size);
+    assert(j >= 0 && j < size);
+
+    if(s == STONE_NONE) {
+        stones.reset(i*size + j);
+        colors.reset(i*size + j);
+        return;
+    }
+    stones.set(i*size + j);
+    if(s == STONE_WHITE)
+        colors.set(i*size + j);
+}
+
+std::vector<v2> Board::get_group(int x, int y) {
+    std::vector<v2> group;
+    std::queue<v2> queue;
+
+    bool visited[MAX_BOARD_SIZE][MAX_BOARD_SIZE] = {};
+
+    auto group_type = stone(x,y);
+    if(group_type == STONE_NONE)
+        return group;
+
+    queue.push({x,y});
+    while(!queue.empty()) {
+        auto el = queue.front();
+        queue.pop();
+
+        if(el.x < 0 || el.x >= size ||
+           el.y < 0 || el.y >= size)
+            continue;
+
+        visited[el.x][el.y] = true;
+        auto s = stone(el.x, el.y);
+        if(s != group_type) continue;
+
+        group.push_back(el);
+
+        if(!visited[el.x-1][el.y]) queue.push({el.x-1, el.y});
+        if(!visited[el.x+1][el.y]) queue.push({el.x+1, el.y});
+        if(!visited[el.x][el.y-1]) queue.push({el.x, el.y-1});
+        if(!visited[el.x][el.y+1]) queue.push({el.x, el.y+1});
+    }
+
+    return group;
+}
+
+int Board::count_liberties(std::vector<v2> group) {
+    assert(group.size() > 0);
+    int result = 0;
+    bool visited[MAX_BOARD_SIZE][MAX_BOARD_SIZE] = {};
+
+    v2 delta[] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+
+    for(auto it : group) {
+        for(int i = 0; i < 4; i++) {
+            int x = it.x + delta[i].x;
+            int y = it.y + delta[i].y;
+            if(x >= 0 && x < size && y >= 0 && y < size) {
+                if(visited[x][y]) continue;
+
+                result += (stone(x, y) == STONE_NONE);
+                visited[x][y] = true;
+            }
+        }
+    }
+
+    return result;
+}
+
+struct MoveLog {
+    int16_t move_count;
+    int16_t last_valid_move_count;
+    int16_t removed_count_total;
+
+    v2_8    moves[512];
+
+    // for each move, how many stones were removed
+    int16_t removed_count[512];
+
+    // list of all removed stones
+    v2_8    removed[512];
+
+    void register_move(int i, int j);
+    void register_remove(std::vector<v2> stones);
+};
+
+void MoveLog::register_move(int i, int j) {
+    assert(i >= 0 && i < MAX_BOARD_SIZE);
+    assert(j >= 0 && j < MAX_BOARD_SIZE);
+    assert(move_count < 512);
+
+    v2_8 v = {(int8_t)i, (int8_t)j};
+    moves[move_count++] = v;
+    if(last_valid_move_count < move_count)
+        last_valid_move_count = move_count;
+}
+
+void MoveLog::register_remove(std::vector<v2> stones) {
+    removed_count[move_count-1] = stones.size();
+    for(auto it : stones) {
+        removed[removed_count_total++] = {(int8_t)it.x, (int8_t)it.y};
+    }
+}
+
+struct GameData {
+    Board board;
+    MoveLog log;
+
+    bool active_player();
+    bool maybe_make_move(int i, int j);
+    void undo_move();
+    void undo_move(int n);
+    void redo_move();
+};
+
+inline bool GameData::active_player() {
+    return (bool)(log.move_count & 0x1);
+}
+
+// returns true if move was successful, otherwise returns false
+// and leaves the GameData unchanged
+bool GameData::maybe_make_move(int i, int j) {
+    Stone s = active_player() ? STONE_WHITE : STONE_BLACK;
+    if(board.stone(i, j) != STONE_NONE)
+        return false;
+
+    GameData previous_state = *this;
+    previous_state.undo_move();
+
+    board.set(i, j, s);
+
+    bool visited[MAX_BOARD_SIZE][MAX_BOARD_SIZE] = {};
+    std::vector<v2> stones_to_remove;
+
+    v2 delta[] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+    for(int it = 0; it < 4; it++) {
+        int x = i + delta[it].x;
+        int y = j + delta[it].y;
+        if(x < 0 || x >= board.size ||
+           y < 0 || y >= board.size)
+            continue;
+
+        if(board.stone(x, y) == s ||
+           board.stone(x, y) == STONE_NONE)
+            continue;
+
+        auto g = board.get_group(x, y);
+        int libs = board.count_liberties(g);
+        if(libs == 0) {
+            for(v2 it : g) {
+                if(!visited[it.x][it.y]) {
+                    stones_to_remove.push_back(it);
+                    visited[it.x][it.y] = true;
+                }
+            }
+        }
+    }
+
+    auto current_move_group = board.get_group(i, j);
+    int libs = board.count_liberties(current_move_group);
+    if(libs == 0 && stones_to_remove.size() == 0) {
+        board.set(i, j, STONE_NONE);
+        return false;
+    }
+
+    for(v2 it : stones_to_remove)
+        board.set(it.x, it.y, STONE_NONE);
+    
+    // verify against ko rule
+    if(previous_state.board.stones == board.stones) {
+        board.set(i, j, STONE_NONE);
+        for(v2 it : stones_to_remove)
+            board.set(it.x, it.y, other_stone_color(s));
+        return false;
+    }
+
+    // move successful
+    log.register_move(i, j);
+    log.register_remove(stones_to_remove);
+    return true;
+}
+
+void GameData::redo_move() {
+    if(log.last_valid_move_count == log.move_count)
+        return;
+    v2_8 _v = log.moves[log.move_count++];
+    v2 v = {(int32_t)_v.x, (int32_t)_v.y};
+    maybe_make_move(v.x, v.y);
+}
+
+void GameData::undo_move() {
+    if(log.move_count == 0) return;
+    Stone s = active_player() ? STONE_WHITE : STONE_BLACK;
+    log.move_count--;
+
+    v2_8 _v = log.moves[log.move_count];
+    v2 v = {(int32_t)_v.x, (int32_t)_v.y};
+    board.set(v.x, v.y, STONE_NONE);
+
+    // place back all removed stones
+    while(log.removed_count[log.move_count] > 0) {
+        v2_8 _v = log.removed[--log.removed_count_total];
+        v2 v = {(int32_t)_v.x, (int32_t)_v.y};
+        board.set(v.x, v.y, s);
+        log.removed_count[log.move_count]--;
+    }
+    
+}
+
+void GameData::undo_move(int n) {
+    for(int i = 0; i < n; i++) {
+        undo_move();
+    }
+}
+
+inline bool is_inside(ImVec2 p, ImVec4 rect) {
     return p.x <= rect.z && p.x >= rect.x &&
            p.y <= rect.w && p.y >= rect.y;
 }
 
-void DrawBoard(ImDrawList *dl, ImVec2 p, int size, float dim) {
-    // draw lines
-    ImU32 color = 0xffffffff;
+void draw_board(ImDrawList *dl, Board *board, ImVec2 p, float dim) {
+    // draw goban
+    ImU32 line_color = 0xffffffff;
+    int size = board->size;
     int fields = size + 1;
     float field_sz = dim / fields;
     float thickness = 2.f;
     for(int i = 1; i < fields; i++) {
         dl->AddLine(ImVec2(p.x + i*field_sz, p.y + field_sz),
                     ImVec2(p.x + i*field_sz, p.y + dim-field_sz),
-                    color, thickness);
+                    line_color, thickness);
         dl->AddLine(ImVec2(p.x + field_sz,     p.y + i*field_sz),
                     ImVec2(p.x + dim-field_sz, p.y + i*field_sz),
-                    color, thickness);
+                    line_color, thickness);
     }
 
+    // draw stones
+    for(int i = 0; i < size; i++) {
+        for(int j = 0; j < size; j++) {
+            Stone s = board->stone(i, j);
+            if(s != STONE_NONE) {
+                ImU32 color = 0xffffffff;
+                if(s == STONE_BLACK)
+                    color = 0xff444444;
+                ImVec2 center = ImVec2(p.x + (i+1)*field_sz, p.y + (j+1)*field_sz);
+                dl->AddCircleFilled(center, field_sz*0.5f, color, 32);
+            }
+        }
+    }
+}
+
+void draw_board_interactive_local(ImDrawList *dl, GameData *gd, ImVec2 p, float dim) {
+    if(ImGui::IsMouseReleased(1)) gd->undo_move();
+
+    draw_board(dl, &gd->board, p, dim);
+
     // draw hover stone
-    ImVec2 mouse = ImGui::GetIO().MousePos;
-    for(int i = 1; i < fields; i++) {
-        for(int j = 1; j < fields; j++) {
-            ImVec2 center = ImVec2(p.x + i*field_sz, p.y + j*field_sz);
+
+    int size = gd->board.size;
+    float field_sz = dim / (size + 1);
+    ImGuiIO &io = ImGui::GetIO();
+    ImVec2 mouse = io.MousePos;
+    for(int i = 0; i < size; i++) {
+        for(int j = 0; j < size; j++) {
+            if(gd->board.stone(i, j) != STONE_NONE) continue;
+            ImVec2 center = ImVec2(p.x + (i+1)*field_sz, p.y + (j+1)*field_sz);
             ImVec4 field = ImVec4(center.x - 0.5f * field_sz,
                                   center.y - 0.5f * field_sz,
                                   center.x + 0.5f * field_sz,
                                   center.y + 0.5f * field_sz);
-            // TODO(piotr): add condition, field empty
-            if(IsInside(mouse, field)) {
-                dl->AddCircleFilled(center, field_sz*0.5f, 0x44ffffff, 20);
+
+            if(is_inside(mouse, field)) {
+
+                ImU32 color = 0x44444444;
+                if(gd->active_player())
+                    color = 0x44ffffff;
+                dl->AddCircleFilled(center, field_sz*0.5f, color, 32);
+                if(ImGui::IsMouseReleased(0)) {
+                    gd->maybe_make_move(i, j);
+                }
+
                 return;
             }
         }
     }
-
-    // TODO(piotr): draw stones
 }
 
 int main(int, char**)
@@ -146,7 +447,7 @@ int main(int, char**)
         bool show_demo_window = true;
         ImGui::ShowDemoWindow(&show_demo_window);
 #endif
-
+        // game window
         {
             float dim = 500.f;
             ImGui::SetNextWindowPos(ImVec2(20, 20));
@@ -162,7 +463,11 @@ int main(int, char**)
             p.x -= 10.f;
             p.y -= 10.f;
 
-            DrawBoard(draw_list, p, 9, dim);
+            static GameData gd = {};
+            if(!gd.board.size) {
+                gd.board.size = 9;
+            }
+            draw_board_interactive_local(draw_list, &gd, p, dim);
 
             ImGui::End();
         }

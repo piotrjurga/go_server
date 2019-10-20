@@ -7,6 +7,7 @@ UNAME_S := $(shell uname -s)
 
 CXXFLAGS = -Iimgui -DIMGUI_IMPL_OPENGL_LOADER_GL3W
 CXXFLAGS += -g -Wall -Wformat
+#CXXFLAGS += -std=c++17
 LIBS = 
 
 ##---------------------------------------------------------------------
