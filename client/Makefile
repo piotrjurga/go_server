@@ -1,5 +1,6 @@
 EXE = go_client
 SOURCES = main.cpp
+SOURCES += game_logic.cpp
 SOURCES += imgui/imgui_impl_sdl.cpp imgui/imgui_impl_opengl3.cpp
 SOURCES += imgui/imgui.cpp imgui/imgui_demo.cpp imgui/imgui_draw.cpp imgui/imgui_widgets.cpp
 OBJS = $(addprefix build/, $(addsuffix .o, $(basename $(notdir $(SOURCES)))))
