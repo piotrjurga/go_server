@@ -1,14 +1,57 @@
+#include <pthread.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netdb.h>
+
 #include "imgui.h"
 #include "imgui_impl_sdl.h"
 #include "imgui_impl_opengl3.h"
-#include "game_logic.h"
-#include <stdio.h>
-#include <SDL.h>
 
+#include "game_logic.h"
+#include "protocol.h"
+
+#include <SDL.h>
 #include <GL/gl3w.h>
 
+#include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 
+int connect_to_server(const char *server_name, uint16_t port_number) {
+   int connection_socket_descriptor;
+   int connect_result;
+   sockaddr_in server_address;
+   hostent *server_host_entity;
+
+   server_host_entity = gethostbyname(server_name);
+   if(!server_host_entity) {
+      //fprintf(stderr, "Nie można uzyskać adresu IP serwera.\n");
+      return 0;
+   }
+
+   connection_socket_descriptor = socket(PF_INET, SOCK_STREAM, 0);
+   if(connection_socket_descriptor < 0) {
+      //fprintf(stderr, "Błąd przy probie utworzenia gniazda.\n");
+      return 0;
+   }
+
+   memset(&server_address, 0, sizeof(struct sockaddr));
+   server_address.sin_family = AF_INET;
+   memcpy(&server_address.sin_addr.s_addr, server_host_entity->h_addr, server_host_entity->h_length);
+   server_address.sin_port = htons(port_number);
+
+   connect_result = connect(connection_socket_descriptor, (sockaddr *)&server_address, sizeof(struct sockaddr));
+   if (connect_result < 0)
+   {
+      //fprintf(stderr, "%s: Błąd przy próbie połączenia z serwerem (%s:%i).\n", argv[0], argv[1], atoi(argv[2]));
+       return 0;
+   }
+
+   return connection_socket_descriptor;
+}
 
 inline bool is_inside(ImVec2 p, ImVec4 rect) {
     return p.x <= rect.z && p.x >= rect.x &&
@@ -84,6 +127,25 @@ void draw_board_interactive_local(ImDrawList *dl, GameData *gd, ImVec2 p, float 
 
 int main(int, char**)
 {
+#if 0
+    // testing network
+    {
+        int connection = 0;
+        connection = connect_to_server("127.0.0.1", 1234);
+        printf("connection: %d\n", connection);
+        puts("Sending request...");
+        Request r = REQUEST_HELLO;
+        write(connection, (void *)&r, sizeof(Request));
+        puts("Request sent");
+        char buf[1024] = {};
+        int res = read(connection, buf, 1023);
+        printf("Answer: %s\n", buf);
+        printf("read result: %d", res);
+
+        return 0;
+    }
+#endif
+
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_GAMECONTROLLER) != 0)
     {
         printf("Error: %s\n", SDL_GetError());
@@ -204,6 +266,24 @@ int main(int, char**)
             }
             draw_board_interactive_local(draw_list, &gd, p, dim);
 
+            ImGui::End();
+        }
+
+        // server interaction debug window
+        {
+            ImGui::Begin("Server");
+            static int connection = 0;
+            ImGui::Text("connection: %x", connection);
+            if(ImGui::Button("Connect")) {
+                connection = connect_to_server("127.0.0.1", 1234);
+            }
+            static char buf[1024] = {};
+            if(ImGui::Button("Send Request")) {
+                Request r = REQUEST_HELLO;
+                write(connection, (void *)&r, sizeof(Request));
+                read(connection, buf, 1023);
+            }
+            ImGui::Text("Request result: %s", buf);
             ImGui::End();
         }
 
