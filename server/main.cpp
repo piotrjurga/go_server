@@ -8,6 +8,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <time.h>
 #include <pthread.h>
@@ -21,6 +22,7 @@
 
 pthread_mutex_t games_mutex;
 static std::vector<GameData> games;
+static std::vector<v2> players;
 
 struct ThreadData {
     int connection;
@@ -31,16 +33,62 @@ void *handle_client(void *t_data) {
     ThreadData *th_data = (ThreadData *)t_data;
     int connection = th_data->connection;
 
+    int32_t active_game_id = -1;
+
     bool done = false;
     while(!done) {
         Request r = REQUEST_NONE;
         read(connection, &r, sizeof(Request));
-        char s[] = "Hello, Sailor!";
         switch(r) {
-            case REQUEST_HELLO:
-                puts("req hello"); //DEBUG
-                write(connection, s, strlen(s));
-                break;
+            case REQUEST_NEW_GAME: {
+                printf("requested new game by connection %d\n", connection);
+                int32_t board_size;
+                read(connection, &board_size, sizeof(int32_t));
+
+                int32_t new_game_id = -1;
+                if(active_game_id != -1) {
+                    write(connection, &new_game_id, sizeof(int32_t));
+                    break;
+                }
+
+                GameData new_game = {};
+                new_game.board.size = board_size;
+
+                pthread_mutex_lock(&games_mutex);
+                new_game_id = games.size();
+                games.push_back(new_game);
+                players.push_back({connection, 0});
+                pthread_mutex_unlock(&games_mutex);
+
+                write(connection, &new_game_id, sizeof(int32_t));
+                printf("new game id: %d\n", new_game_id);
+            } break;
+
+            case REQUEST_JOIN_GAME: {
+                int32_t game_id = -1;
+                read(connection, &game_id, sizeof(int32_t));
+                printf("reqested join id %d by connection %d\n", game_id, connection);
+
+                int32_t success = 0;
+                if(active_game_id != -1) {
+                    write(connection, &success, sizeof(int32_t));
+                    break;
+                }
+
+                pthread_mutex_lock(&games_mutex);
+                if(game_id < 0 || game_id >= (int32_t)games.size() || players[game_id].y != 0) {
+                    write(connection, &success, sizeof(int32_t));
+                    pthread_mutex_unlock(&games_mutex);
+                    break;
+                }
+
+                players[game_id].y = connection;
+                active_game_id = game_id;
+                pthread_mutex_unlock(&games_mutex);
+                success = 1;
+                write(connection, &success, sizeof(int32_t));
+                puts("join success");
+             } break;
 
             case REQUEST_NONE:
             case REQUEST_EXIT:

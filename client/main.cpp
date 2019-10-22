@@ -277,13 +277,26 @@ int main(int, char**)
             if(ImGui::Button("Connect")) {
                 connection = connect_to_server("127.0.0.1", 1234);
             }
-            static char buf[1024] = {};
-            if(ImGui::Button("Send Request")) {
-                Request r = REQUEST_HELLO;
-                write(connection, (void *)&r, sizeof(Request));
-                read(connection, buf, 1023);
+
+            static int32_t game_id = 0;
+            if(ImGui::Button("Request new game")) {
+                Request r = REQUEST_NEW_GAME;
+                write(connection, &r, sizeof(Request));
+                int32_t size = 9;
+                write(connection, &size, sizeof(int32_t));
+                read(connection, &game_id, sizeof(int32_t));
             }
-            ImGui::Text("Request result: %s", buf);
+            ImGui::Text("Game id: %d", game_id);
+
+            static int32_t join_success = 0; 
+            if(ImGui::Button("Request join game")) {
+                Request r = REQUEST_JOIN_GAME;
+                write(connection, &r, sizeof(Request));
+                int32_t id = 0;
+                write(connection, &id, sizeof(int32_t));
+                read(connection, &join_success, sizeof(int32_t));
+            }
+            ImGui::Text("Join success: %d", join_success);
             ImGui::End();
         }
 
