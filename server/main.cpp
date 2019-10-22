@@ -20,9 +20,24 @@
 #define SERVER_PORT 1234
 #define QUEUE_SIZE 5
 
-pthread_mutex_t games_mutex;
-static std::vector<GameData> games;
-static std::vector<v2> players;
+struct Room {
+    GameData game;
+    int32_t player_a;
+    int32_t player_b;
+};
+
+int first_empty_slot(std::vector<Room> &vec) {
+    int i = 0;
+    for(; i < (int)vec.size(); i++) {
+        if(vec[i].player_a == 0)
+            return i;
+    }
+    vec.resize(vec.size()+1);
+    return i;
+}
+
+pthread_mutex_t rooms_mutex;
+static std::vector<Room> rooms;
 
 struct ThreadData {
     int connection;
@@ -33,7 +48,7 @@ void *handle_client(void *t_data) {
     ThreadData *th_data = (ThreadData *)t_data;
     int connection = th_data->connection;
 
-    int32_t active_game_id = -1;
+    int32_t active_room_id = -1;
 
     bool done = false;
     while(!done) {
@@ -45,48 +60,50 @@ void *handle_client(void *t_data) {
                 int32_t board_size;
                 read(connection, &board_size, sizeof(int32_t));
 
-                int32_t new_game_id = -1;
-                if(active_game_id != -1) {
-                    write(connection, &new_game_id, sizeof(int32_t));
+                int32_t new_room_id = -1;
+                if(active_room_id != -1) {
+                    write(connection, &new_room_id, sizeof(int32_t));
                     break;
                 }
 
-                GameData new_game = {};
-                new_game.board.size = board_size;
+                Room new_room = {};
+                new_room.game.board.size = board_size;
+                new_room.player_a = connection;
 
-                pthread_mutex_lock(&games_mutex);
-                new_game_id = games.size();
-                games.push_back(new_game);
-                players.push_back({connection, 0});
-                pthread_mutex_unlock(&games_mutex);
+                pthread_mutex_lock(&rooms_mutex);
+                new_room_id = first_empty_slot(rooms);
+                rooms[new_room_id] = new_room;
+                pthread_mutex_unlock(&rooms_mutex);
 
-                write(connection, &new_game_id, sizeof(int32_t));
-                printf("new game id: %d\n", new_game_id);
+                write(connection, &new_room_id, sizeof(int32_t));
+                printf("new room id: %d\n", new_room_id);
             } break;
 
             case REQUEST_JOIN_GAME: {
-                int32_t game_id = -1;
-                read(connection, &game_id, sizeof(int32_t));
-                printf("reqested join id %d by connection %d\n", game_id, connection);
+                int32_t room_id = -1;
+                read(connection, &room_id, sizeof(int32_t));
+                printf("reqested join id %d by connection %d\n", room_id, connection);
 
                 int32_t success = 0;
-                if(active_game_id != -1) {
+                if(active_room_id != -1) {
                     write(connection, &success, sizeof(int32_t));
                     break;
                 }
 
-                pthread_mutex_lock(&games_mutex);
-                if(game_id < 0 || game_id >= (int32_t)games.size() || players[game_id].y != 0) {
+                pthread_mutex_lock(&rooms_mutex);
+                if(room_id < 0 || room_id >= (int32_t)rooms.size() || rooms[room_id].player_b != 0) {
                     write(connection, &success, sizeof(int32_t));
-                    pthread_mutex_unlock(&games_mutex);
+                    pthread_mutex_unlock(&rooms_mutex);
                     break;
                 }
 
-                players[game_id].y = connection;
-                active_game_id = game_id;
-                pthread_mutex_unlock(&games_mutex);
+                rooms[room_id].player_b = connection;
+                active_room_id = room_id;
+                pthread_mutex_unlock(&rooms_mutex);
+
                 success = 1;
                 write(connection, &success, sizeof(int32_t));
+                // TODO(piotr): start the game
                 puts("join success");
              } break;
 
@@ -118,7 +135,7 @@ void handle_connection(int connection_socket_descriptor) {
 }
 
 int main(int argc, char **argv) {
-    games_mutex = PTHREAD_MUTEX_INITIALIZER;
+    rooms_mutex = PTHREAD_MUTEX_INITIALIZER;
 
     int server_socket_descriptor;
     int connection_socket_descriptor;
@@ -164,6 +181,6 @@ int main(int argc, char **argv) {
     }
 
     close(server_socket_descriptor);
-    pthread_mutex_destroy(&games_mutex);
+    pthread_mutex_destroy(&rooms_mutex);
     return(0);
 }
