@@ -52,16 +52,15 @@ void *handle_client(void *t_data) {
 
     bool done = false;
     while(!done) {
-        Request r = REQUEST_NONE;
+        Request r = {};
         read(connection, &r, sizeof(Request));
-        switch(r) {
-            case REQUEST_NEW_GAME: {
-                printf("requested new game by connection %d\n", connection);
-                int32_t board_size;
-                read(connection, &board_size, sizeof(int32_t));
-
+        //printf("received request of type %d\n", r.type);
+        switch(r.type) {
+            case REQUEST_NEW_ROOM: {
+                printf("requested new room by connection %d\n", connection);
                 int32_t new_room_id = -1;
-                if(active_room_id != -1) {
+                int board_size = r.new_room.board_size;
+                if(active_room_id != -1 || board_size < 2 || board_size > 19) {
                     write(connection, &new_room_id, sizeof(int32_t));
                     break;
                 }
@@ -79,9 +78,8 @@ void *handle_client(void *t_data) {
                 printf("new room id: %d\n", new_room_id);
             } break;
 
-            case REQUEST_JOIN_GAME: {
-                int32_t room_id = -1;
-                read(connection, &room_id, sizeof(int32_t));
+            case REQUEST_JOIN_ROOM: {
+                int32_t room_id = r.join_room.room_id;
                 printf("reqested join id %d by connection %d\n", room_id, connection);
 
                 int32_t success = 0;
@@ -107,16 +105,22 @@ void *handle_client(void *t_data) {
                 puts("join success");
              } break;
 
+            case REQUEST_MAKE_MOVE: // TODO(piotr): 
+            case REQUEST_LIST_ROOMS: // TODO(piotr): 
             case REQUEST_NONE:
             case REQUEST_EXIT:
                 puts("req exit"); //DEBUG
                 done = true;
                 break;
+
+            default: {
+                printf("received unrecognized request type %d\n", (int)r.type);
+            }
         }
     }
 
     free(th_data);
-    pthread_exit(NULL);
+    pthread_exit(0);
 }
 
 void handle_connection(int connection_socket_descriptor) {

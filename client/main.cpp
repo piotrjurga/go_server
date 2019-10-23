@@ -58,6 +58,17 @@ inline bool is_inside(ImVec2 p, ImVec4 rect) {
            p.y <= rect.w && p.y >= rect.y;
 }
 
+static int server_connection;
+static bool ready_to_make_move = false;
+
+void send_last_move(GameData *gd) {
+    Request r = {};
+    r.type = REQUEST_MAKE_MOVE;
+    int move_count = gd->log.move_count;
+    r.make_move.move = gd->log.moves[move_count-1];
+    send_request_async(server_connection, r);
+}
+
 void draw_board(ImDrawList *dl, Board *board, ImVec2 p, float dim) {
     // draw goban
     ImU32 line_color = 0xffffffff;
@@ -89,13 +100,8 @@ void draw_board(ImDrawList *dl, Board *board, ImVec2 p, float dim) {
     }
 }
 
-void draw_board_interactive_local(ImDrawList *dl, GameData *gd, ImVec2 p, float dim) {
-    if(ImGui::IsMouseReleased(1)) gd->undo_move();
-
-    draw_board(dl, &gd->board, p, dim);
-
-    // draw hover stone
-
+// returns true if move was made
+bool draw_board_interact(ImDrawList *dl, GameData *gd, ImVec2 p, float dim) {
     int size = gd->board.size;
     float field_sz = dim / (size + 1);
     ImGuiIO &io = ImGui::GetIO();
@@ -117,37 +123,36 @@ void draw_board_interactive_local(ImDrawList *dl, GameData *gd, ImVec2 p, float 
                 dl->AddCircleFilled(center, field_sz*0.5f, color, 32);
                 if(ImGui::IsMouseReleased(0)) {
                     gd->maybe_make_move(i, j);
+                    return true;
                 }
 
-                return;
+                return false;
             }
+        }
+    }
+
+    return false;
+}
+
+void draw_board_interactive_local(ImDrawList *dl, GameData *gd, ImVec2 p, float dim) {
+    if(ImGui::IsMouseReleased(1)) gd->undo_move();
+
+    draw_board(dl, &gd->board, p, dim);
+    draw_board_interact(dl, gd, p, dim);
+}
+
+void draw_board_interactive_online(ImDrawList *dl, GameData *gd, ImVec2 p, float dim) {
+    draw_board(dl, &gd->board, p, dim);
+    if(ready_to_make_move) {
+        bool made_move = draw_board_interact(dl, gd, p, dim);
+        if(made_move) {
+            //wait_for_move(gd);
         }
     }
 }
 
-int main(int, char**)
-{
-#if 0
-    // testing network
-    {
-        int connection = 0;
-        connection = connect_to_server("127.0.0.1", 1234);
-        printf("connection: %d\n", connection);
-        puts("Sending request...");
-        Request r = REQUEST_HELLO;
-        write(connection, (void *)&r, sizeof(Request));
-        puts("Request sent");
-        char buf[1024] = {};
-        int res = read(connection, buf, 1023);
-        printf("Answer: %s\n", buf);
-        printf("read result: %d", res);
-
-        return 0;
-    }
-#endif
-
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_GAMECONTROLLER) != 0)
-    {
+int main(int, char**) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_GAMECONTROLLER) != 0) {
         printf("Error: %s\n", SDL_GetError());
         return -1;
     }
@@ -182,8 +187,7 @@ int main(int, char**)
     // Initialize OpenGL loader
     bool err = gl3wInit() != 0;
 
-    if (err)
-    {
+    if (err) {
         fprintf(stderr, "Failed to initialize OpenGL loader!\n");
         return 1;
     }
@@ -224,11 +228,9 @@ int main(int, char**)
 
     // Main loop
     bool done = false;
-    while (!done)
-    {
+    while (!done) {
         SDL_Event event;
-        while (SDL_PollEvent(&event))
-        {
+        while (SDL_PollEvent(&event)) {
             ImGui_ImplSDL2_ProcessEvent(&event);
             if (event.type == SDL_QUIT)
                 done = true;
@@ -264,7 +266,7 @@ int main(int, char**)
             if(!gd.board.size) {
                 gd.board.size = 9;
             }
-            draw_board_interactive_local(draw_list, &gd, p, dim);
+            draw_board_interactive_online(draw_list, &gd, p, dim);
 
             ImGui::End();
         }
@@ -272,29 +274,30 @@ int main(int, char**)
         // server interaction debug window
         {
             ImGui::Begin("Server");
-            static int connection = 0;
-            ImGui::Text("connection: %x", connection);
+            ImGui::Text("connection: %x", server_connection);
             if(ImGui::Button("Connect")) {
-                connection = connect_to_server("127.0.0.1", 1234);
+                server_connection = connect_to_server("127.0.0.1", 1234);
             }
 
-            static int32_t game_id = 0;
-            if(ImGui::Button("Request new game")) {
-                Request r = REQUEST_NEW_GAME;
-                write(connection, &r, sizeof(Request));
-                int32_t size = 9;
-                write(connection, &size, sizeof(int32_t));
-                read(connection, &game_id, sizeof(int32_t));
+            static int32_t room_id = 0;
+            if(ImGui::Button("Request new room")) {
+                Request r = {};
+                r.type = REQUEST_NEW_ROOM;
+                r.new_room.board_size = 9;
+                send_request_async(server_connection, r);
+                puts("request sent");
+                read(server_connection, &room_id, sizeof(int32_t));
+                if(room_id) ready_to_make_move = true;
             }
-            ImGui::Text("Game id: %d", game_id);
+            ImGui::Text("Game id: %d", room_id);
 
             static int32_t join_success = 0; 
-            if(ImGui::Button("Request join game")) {
-                Request r = REQUEST_JOIN_GAME;
-                write(connection, &r, sizeof(Request));
-                int32_t id = 0;
-                write(connection, &id, sizeof(int32_t));
-                read(connection, &join_success, sizeof(int32_t));
+            if(ImGui::Button("Request join room")) {
+                Request r = {};
+                r.type = REQUEST_JOIN_ROOM;
+                r.join_room.room_id = 0;
+                send_request_async(server_connection, r);
+                read(server_connection, &join_success, sizeof(int32_t));
             }
             ImGui::Text("Join success: %d", join_success);
             ImGui::End();

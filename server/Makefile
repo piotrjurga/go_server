@@ -1,6 +1,6 @@
 EXE = go_server
 SOURCES = main.cpp
-SOURCES += ../game_logic.cpp
+SOURCES += ../game_logic.cpp ../protocol.cpp
 OBJS = $(addprefix build/, $(addsuffix .o, $(basename $(notdir $(SOURCES)))))
 UNAME_S := $(shell uname -s)
 
