@@ -53,6 +53,38 @@ int connect_to_server(const char *server_name, uint16_t port_number) {
    return connection_socket_descriptor;
 }
 
+struct ReadThreadData {
+    int connection;
+    void *buffer;
+    int size;
+    bool *finished;
+};
+
+void *thread_read_data(void *t_data) {
+    pthread_detach(pthread_self());
+    ReadThreadData *th_data = (ReadThreadData *)t_data;
+    int connection = th_data->connection;
+    void *buffer = th_data->buffer;
+    int size = th_data->size;
+    bool *finished = th_data->finished;
+
+    read(connection, buffer, size);
+    *finished = true;
+
+    free(th_data);
+    pthread_exit(0);
+}
+
+void read_async(int connection, void *buffer, int size, bool *finished) {
+    pthread_t thread;
+    ReadThreadData *t_data = (ReadThreadData *)malloc(sizeof(ReadThreadData));
+    t_data->connection = connection;
+    t_data->buffer     = buffer;
+    t_data->size       = size;
+    t_data->finished   = finished;
+    pthread_create(&thread, 0, thread_read_data, (void *)t_data);
+}
+
 inline bool is_inside(ImVec2 p, ImVec4 rect) {
     return p.x <= rect.z && p.x >= rect.x &&
            p.y <= rect.w && p.y >= rect.y;
@@ -116,21 +148,18 @@ bool draw_board_interact(ImDrawList *dl, GameData *gd, ImVec2 p, float dim) {
                                   center.y + 0.5f * field_sz);
 
             if(is_inside(mouse, field)) {
-
                 ImU32 color = 0x44444444;
                 if(gd->active_player())
                     color = 0x44ffffff;
                 dl->AddCircleFilled(center, field_sz*0.5f, color, 32);
                 if(ImGui::IsMouseReleased(0)) {
-                    gd->maybe_make_move(i, j);
-                    return true;
+                    bool res = gd->maybe_make_move(i, j);
+                    return res;
                 }
-
                 return false;
             }
         }
     }
-
     return false;
 }
 
@@ -141,12 +170,29 @@ void draw_board_interactive_local(ImDrawList *dl, GameData *gd, ImVec2 p, float 
     draw_board_interact(dl, gd, p, dim);
 }
 
+static v2_8 opponent_move;
+static bool got_opponent_move;
+
 void draw_board_interactive_online(ImDrawList *dl, GameData *gd, ImVec2 p, float dim) {
     draw_board(dl, &gd->board, p, dim);
+
     if(ready_to_make_move) {
         bool made_move = draw_board_interact(dl, gd, p, dim);
         if(made_move) {
-            //wait_for_move(gd);
+            ready_to_make_move = false;
+            send_last_move(gd);
+            read_async(server_connection, &opponent_move,
+                       sizeof(v2_8), &got_opponent_move);
+        }
+    } else {
+        if(got_opponent_move) {
+            got_opponent_move = false;
+            bool res = gd->maybe_make_move((int)opponent_move.x,
+                                           (int)opponent_move.y);
+            // TODO(piotr): maybe handle this error by downloading
+            // the whole board state from the server
+            assert(res && "server sent an illegal opponent move");
+            ready_to_make_move = true;
         }
     }
 }
@@ -280,24 +326,34 @@ int main(int, char**) {
             }
 
             static int32_t room_id = 0;
+            static bool got_room_id = false;
             if(ImGui::Button("Request new room")) {
                 Request r = {};
                 r.type = REQUEST_NEW_ROOM;
                 r.new_room.board_size = 9;
                 send_request_async(server_connection, r);
-                puts("request sent");
-                read(server_connection, &room_id, sizeof(int32_t));
-                if(room_id) ready_to_make_move = true;
+                read_async(server_connection, &room_id, sizeof(int32_t), &got_room_id);
+            }
+            if(got_room_id && room_id != -1) {
+                got_room_id = false;
+                puts("got room id");
+                ready_to_make_move = true;
             }
             ImGui::Text("Game id: %d", room_id);
 
             static int32_t join_success = 0; 
+            static bool got_join_success = false; 
             if(ImGui::Button("Request join room")) {
                 Request r = {};
                 r.type = REQUEST_JOIN_ROOM;
                 r.join_room.room_id = 0;
                 send_request_async(server_connection, r);
-                read(server_connection, &join_success, sizeof(int32_t));
+                read_async(server_connection, &join_success, sizeof(int32_t), &got_join_success);
+            }
+            if(got_join_success && join_success) {
+                got_join_success = false;
+                read_async(server_connection, &opponent_move,
+                           sizeof(v2_8), &got_opponent_move);
             }
             ImGui::Text("Join success: %d", join_success);
             ImGui::End();

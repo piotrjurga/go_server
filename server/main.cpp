@@ -12,6 +12,7 @@
 #include <string.h>
 #include <time.h>
 #include <pthread.h>
+#include <assert.h>
 #include <vector>
 
 #include "game_logic.h"
@@ -71,6 +72,7 @@ void *handle_client(void *t_data) {
 
                 pthread_mutex_lock(&rooms_mutex);
                 new_room_id = first_empty_slot(rooms);
+                active_room_id = new_room_id;
                 rooms[new_room_id] = new_room;
                 pthread_mutex_unlock(&rooms_mutex);
 
@@ -105,8 +107,26 @@ void *handle_client(void *t_data) {
                 puts("join success");
              } break;
 
-            case REQUEST_MAKE_MOVE: // TODO(piotr): 
+            case REQUEST_MAKE_MOVE: {
+                v2_8 move = r.make_move.move;
+                int x = (int)move.x, y = (int)move.y;
+                printf("reqested make move (%d, %d) by connection %d\n", x, y, connection);
+                pthread_mutex_lock(&rooms_mutex);
+                bool res = rooms[active_room_id].game.maybe_make_move(x, y);
+                // TODO(piotr): handle this error
+                assert(res && "illegal move in REQUEST_MAKE_MOVE");
+
+                int other_player = rooms[active_room_id].player_a;
+                if(other_player == connection)
+                    other_player = rooms[active_room_id].player_b;
+                printf("sending move to player %d\n", other_player);
+                write(other_player, &move, sizeof(v2_8));
+
+                pthread_mutex_unlock(&rooms_mutex);
+            } break;
+
             case REQUEST_LIST_ROOMS: // TODO(piotr): 
+                assert(false && "got not handled REQUEST_LIST_ROOMS");
             case REQUEST_NONE:
             case REQUEST_EXIT:
                 puts("req exit"); //DEBUG
