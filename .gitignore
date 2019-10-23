@@ -1,0 +1,5 @@
+**/build
+**/imgui.ini
+**/*.swp
+client/go_client
+server/go_server
