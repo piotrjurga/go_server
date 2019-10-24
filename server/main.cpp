@@ -156,11 +156,11 @@ void *handle_client(void *t_data) {
             } break;
 
             case REQUEST_NONE: {
-                printf("got request none from %d", connection);
+                printf("got request none from %d\n", connection);
                 done = true;
             } break;
             case REQUEST_EXIT: {
-                printf("got reqest exit from %d", connection);
+                printf("got reqest exit from %d\n", connection);
                 done = true;
             } break;
 

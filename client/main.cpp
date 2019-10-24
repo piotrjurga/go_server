@@ -363,8 +363,12 @@ int main(int, char**) {
         {
             ImGui::Begin("Server");
             ImGui::Text("connection: %x", cs.connection);
+            static char server_address[16] = "localhost";
+            static char server_port[8] = "1234";
+            ImGui::InputText("server address", server_address, 16);
+            ImGui::InputText("server port", server_port, 8);
             if(ImGui::Button("Connect")) {
-                cs.connection = connect_to_server("127.0.0.1", 1234);
+                cs.connection = connect_to_server(server_address, atoi(server_port));
                 pthread_t thread;
                 pthread_create(&thread, 0, client_thread, (void *)&cs);
             }
@@ -387,10 +391,12 @@ int main(int, char**) {
             }
             ImGui::Text("Game id: %d", cs.room_id);
 
+            static char room_id_buffer[4];
+            ImGui::InputText("requested room id", room_id_buffer, 4);
             if(ImGui::Button("Request join room")) {
                 Request r = {};
                 r.type = REQUEST_JOIN_ROOM;
-                r.join_room.room_id = 0;
+                r.join_room.room_id = atoi(room_id_buffer);
                 send_request_async(cs.connection, r);
             }
             if(cs.got_join_result && cs.join_result) {
