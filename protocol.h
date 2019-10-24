@@ -41,15 +41,29 @@ void send_request_async(int connection, Request r);
 enum ResponseType {
     RESPONSE_NONE,
     RESPONSE_NEW_MOVE,
+    RESPONSE_NEW_ROOM_RESULT,
+    RESPONSE_JOIN_RESULT,
+    RESPONSE_PLAYER_JOINED,
 };
 
 struct ResponseNewMove {
+    int32_t room_id;
     v2_8 move;
+};
+
+struct ResponseNewRoomResult {
+    int32_t room_id;
+};
+
+struct ResponseJoinResult {
+    bool success;
 };
 
 struct Response {
     ResponseType type;
     union {
         ResponseNewMove new_move;
+        ResponseNewRoomResult new_room_result;
+        ResponseJoinResult join_result;
     };
 };

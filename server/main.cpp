@@ -56,6 +56,7 @@ void *handle_client(void *t_data) {
     bool done = false;
     while(!done) {
         Request r = {};
+        Response res = {};
         read(connection, &r, sizeof(Request));
         //printf("received request of type %d\n", r.type);
         switch(r.type) {
@@ -63,8 +64,10 @@ void *handle_client(void *t_data) {
                 printf("requested new room by connection %d\n", connection);
                 int32_t new_room_id = -1;
                 int board_size = r.new_room.board_size;
+                res.type = RESPONSE_NEW_ROOM_RESULT;
                 if(active_room_id != -1 || board_size < 2 || board_size > 19) {
-                    write(connection, &new_room_id, sizeof(int32_t));
+                    res.new_room_result.room_id = -1;
+                    write(connection, &res, sizeof(Response));
                     break;
                 }
 
@@ -78,34 +81,41 @@ void *handle_client(void *t_data) {
                 rooms[new_room_id] = new_room;
                 pthread_mutex_unlock(&rooms_mutex);
 
-                write(connection, &new_room_id, sizeof(int32_t));
+                res.new_room_result.room_id = new_room_id;
+                write(connection, &res, sizeof(Response));
                 printf("new room id: %d\n", new_room_id);
             } break;
 
             case REQUEST_JOIN_ROOM: {
+                res.type = RESPONSE_JOIN_RESULT;
                 int32_t room_id = r.join_room.room_id;
                 printf("reqested join id %d by connection %d\n", room_id, connection);
 
-                int32_t success = 0;
+                res.join_result.success = false;
                 if(active_room_id != -1) {
-                    write(connection, &success, sizeof(int32_t));
+                    write(connection, &res, sizeof(Response));
                     break;
                 }
 
                 pthread_mutex_lock(&rooms_mutex);
                 if(room_id < 0 || room_id >= (int32_t)rooms.size() || rooms[room_id].player_b != 0) {
-                    write(connection, &success, sizeof(int32_t));
+                    write(connection, &res, sizeof(Response));
                     pthread_mutex_unlock(&rooms_mutex);
                     break;
                 }
 
                 rooms[room_id].player_b = connection;
+                int other_player = rooms[room_id].player_a;
                 active_room_id = room_id;
                 pthread_mutex_unlock(&rooms_mutex);
 
-                success = 1;
-                write(connection, &success, sizeof(int32_t));
-                // TODO(piotr): start the game
+                res.join_result.success = true;
+                write(connection, &res, sizeof(Response));
+
+                Response res2 = {};
+                res2.type = RESPONSE_PLAYER_JOINED;
+                // TODO(piotr): put a mutex on every connection?
+                write(other_player, &res2, sizeof(Response));
                 puts("join success");
              } break;
 
@@ -114,15 +124,21 @@ void *handle_client(void *t_data) {
                 int x = (int)move.x, y = (int)move.y;
                 printf("reqested make move (%d, %d) by connection %d\n", x, y, connection);
                 pthread_mutex_lock(&rooms_mutex);
-                bool res = rooms[active_room_id].game.maybe_make_move(x, y);
+                bool result = rooms[active_room_id].game.maybe_make_move(x, y);
                 // TODO(piotr): handle this error
-                assert(res && "illegal move in REQUEST_MAKE_MOVE");
+                assert(result && "illegal move in REQUEST_MAKE_MOVE");
 
                 int other_player = rooms[active_room_id].player_a;
                 if(other_player == connection)
                     other_player = rooms[active_room_id].player_b;
+                // TODO(piotr): broadcast this message to everyone
+                // watching the game
                 printf("sending move to player %d\n", other_player);
-                write(other_player, &move, sizeof(v2_8));
+                res.type = RESPONSE_NEW_MOVE;
+                res.new_move.room_id = active_room_id;
+                res.new_move.move.x = x;
+                res.new_move.move.y = y;
+                write(other_player, &res, sizeof(Response));
 
                 pthread_mutex_unlock(&rooms_mutex);
             } break;

@@ -24,3 +24,8 @@ void send_request_async(int connection, Request r) {
     thread_data->request = r;
     pthread_create(&thread, 0, thread_send_request, (void *)thread_data);
 }
+
+
+void send_response(int connection, Response r) {
+    write(connection, &r, sizeof(Response));
+}

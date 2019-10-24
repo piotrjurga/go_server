@@ -53,33 +53,49 @@ int connect_to_server(const char *server_name, uint16_t port_number) {
    return connection_socket_descriptor;
 }
 
+static bool ready_to_make_move = false;
+
 struct ClientState {
+    int connection;
     bool got_opponent_move;
-    v2_8 opponent_move;
+    v2 opponent_move;
     bool got_room_id;
     int32_t room_id;
-}
-
-static ClientState global_state;
-
-struct ClientThreadData {
-    int connection;
-    // TODO(piotr): 
+    bool got_join_result;
+    bool join_result;
+    bool player_joined;
 };
 
 void *client_thread(void *t_data) {
     pthread_detach(pthread_self());
-    ClientThreadData *th_data = (ClientThreadData *)t_data;
-    int connection = th_data->connection;
+    ClientState *cs = (ClientState *)t_data;
 
     bool done = false;
     while(!done) {
         Response r = {};
-        read(connection, &r, sizeof(Response));
+        read(cs->connection, &r, sizeof(Response));
 
         switch(r.type) {
             case RESPONSE_NEW_MOVE: {
-                assert(false && "site under construction");
+                v2_8 m = r.new_move.move;
+                cs->opponent_move = {(int)m.x, (int)m.y};
+                cs->got_opponent_move = true;
+            } break;
+            case RESPONSE_NEW_ROOM_RESULT: {
+                assert(cs->room_id == 0);
+                cs->room_id = r.new_room_result.room_id;
+                cs->got_room_id = true;
+            } break;
+            case RESPONSE_JOIN_RESULT: {
+                cs->join_result = r.join_result.success;
+                cs->got_join_result = true;
+            } break;
+            case RESPONSE_PLAYER_JOINED: {
+                cs->player_joined = true;
+            } break;
+            case RESPONSE_NONE: {
+                puts("got response none!");
+                done = true;
             } break;
         }
     }
@@ -124,15 +140,12 @@ inline bool is_inside(ImVec2 p, ImVec4 rect) {
            p.y <= rect.w && p.y >= rect.y;
 }
 
-static int server_connection;
-static bool ready_to_make_move = false;
-
-void send_last_move(GameData *gd) {
+void send_last_move(int connection, GameData *gd) {
     Request r = {};
     r.type = REQUEST_MAKE_MOVE;
     int move_count = gd->log.move_count;
     r.make_move.move = gd->log.moves[move_count-1];
-    send_request_async(server_connection, r);
+    send_request_async(connection, r);
 }
 
 void draw_board(ImDrawList *dl, Board *board, ImVec2 p, float dim) {
@@ -205,20 +218,20 @@ void draw_board_interactive_local(ImDrawList *dl, GameData *gd, ImVec2 p, float 
 }
 
 
-void draw_board_interactive_online(ImDrawList *dl, GameData *gd, ImVec2 p, float dim) {
+void draw_board_interactive_online(ClientState *cs, ImDrawList *dl, GameData *gd, ImVec2 p, float dim) {
     draw_board(dl, &gd->board, p, dim);
 
     if(ready_to_make_move) {
         bool made_move = draw_board_interact(dl, gd, p, dim);
         if(made_move) {
             ready_to_make_move = false;
-            send_last_move(gd);
+            send_last_move(cs->connection, gd);
         }
     } else {
-        if(got_opponent_move) {
-            got_opponent_move = false;
-            bool res = gd->maybe_make_move((int)opponent_move.x,
-                                           (int)opponent_move.y);
+        if(cs->got_opponent_move) {
+            cs->got_opponent_move = false;
+            bool res = gd->maybe_make_move((int)cs->opponent_move.x,
+                                           (int)cs->opponent_move.y);
             // TODO(piotr): maybe handle this error by downloading
             // the whole board state from the server
             assert(res && "server sent an illegal opponent move");
@@ -301,6 +314,7 @@ int main(int, char**) {
 
     // Our state
     ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
+    ClientState cs = {};
 
     // Main loop
     bool done = false;
@@ -326,13 +340,10 @@ int main(int, char**) {
         static bool the_game_is_on = false;
         if(the_game_is_on) {
             float dim = 500.f;
-            ImGui::SetNextWindowPos(ImVec2(20, 20));
-            ImGui::SetNextWindowSize(ImVec2(dim, dim+20.f));
-            ImGuiWindowFlags wf = ImGuiWindowFlags_NoMove |
-                                  ImGuiWindowFlags_NoResize |
-                                  ImGuiWindowFlags_NoCollapse;
+            //ImGui::SetNextWindowPos(ImVec2(20, 20));
+            //ImGui::SetNextWindowSize(ImVec2(dim, dim+20.f));
 
-            ImGui::Begin("Game", 0, wf);
+            ImGui::Begin("Game");
 
             ImDrawList* draw_list = ImGui::GetWindowDrawList();
             ImVec2 p = ImGui::GetCursorScreenPos();
@@ -343,7 +354,7 @@ int main(int, char**) {
             if(!gd.board.size) {
                 gd.board.size = 9;
             }
-            draw_board_interactive_online(draw_list, &gd, p, dim);
+            draw_board_interactive_online(&cs, draw_list, &gd, p, dim);
 
             ImGui::End();
         }
@@ -351,50 +362,42 @@ int main(int, char**) {
         // server interaction debug window
         {
             ImGui::Begin("Server");
-            ImGui::Text("connection: %x", server_connection);
+            ImGui::Text("connection: %x", cs.connection);
             if(ImGui::Button("Connect")) {
-                server_connection = connect_to_server("127.0.0.1", 1234);
+                cs.connection = connect_to_server("127.0.0.1", 1234);
+                pthread_t thread;
+                pthread_create(&thread, 0, client_thread, (void *)&cs);
             }
 
             if(ImGui::Button("Request new room")) {
                 Request r = {};
                 r.type = REQUEST_NEW_ROOM;
                 r.new_room.board_size = 9;
-                send_request_async(server_connection, r);
-                read_async(server_connection, &room_id, sizeof(int32_t), &got_room_id);
+                send_request_async(cs.connection, r);
             }
-            static bool someone_joined = false;
-            if(got_room_id && room_id != -1) {
-                got_room_id = false;
+            if(cs.got_room_id && cs.room_id != -1) {
+                cs.got_room_id = false;
                 puts("got room id");
-                static int32_t trash;
-                read_async(server_connection, &trash, sizeof(int32_t), &someone_joined);
                 ready_to_make_move = true;
             }
-            if(someone_joined) {
-                someone_joined = false;
-                puts("someone joined");
+            if(cs.player_joined) {
+                cs.player_joined = false;
+                puts("player joined");
                 the_game_is_on = true;
             }
-            ImGui::Text("Game id: %d", room_id);
+            ImGui::Text("Game id: %d", cs.room_id);
 
-            static int32_t join_success = 0; 
-            static bool got_join_success = false; 
             if(ImGui::Button("Request join room")) {
                 Request r = {};
                 r.type = REQUEST_JOIN_ROOM;
                 r.join_room.room_id = 0;
-                send_request_async(server_connection, r);
-                read_async(server_connection, &join_success,
-                           sizeof(int32_t), &got_join_success);
+                send_request_async(cs.connection, r);
             }
-            if(got_join_success && join_success) {
-                got_join_success = false;
+            if(cs.got_join_result && cs.join_result) {
+                cs.got_join_result = false;
                 the_game_is_on = true;
-                read_async(server_connection, &opponent_move,
-                           sizeof(v2_8), &got_opponent_move);
             }
-            ImGui::Text("Join success: %d", join_success);
+            ImGui::Text("Join success: %d", cs.join_result);
             ImGui::End();
         }
 
