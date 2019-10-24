@@ -37,3 +37,19 @@ struct Request {
 
 void send_request(int connection, Request r);
 void send_request_async(int connection, Request r);
+
+enum ResponseType {
+    RESPONSE_NONE,
+    RESPONSE_NEW_MOVE,
+};
+
+struct ResponseNewMove {
+    v2_8 move;
+};
+
+struct Response {
+    ResponseType type;
+    union {
+        ResponseNewMove new_move;
+    };
+};

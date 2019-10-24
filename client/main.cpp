@@ -28,13 +28,13 @@ int connect_to_server(const char *server_name, uint16_t port_number) {
 
    server_host_entity = gethostbyname(server_name);
    if(!server_host_entity) {
-      //fprintf(stderr, "Nie można uzyskać adresu IP serwera.\n");
+      fprintf(stderr, "Nie można uzyskać adresu IP serwera.\n");
       return 0;
    }
 
    connection_socket_descriptor = socket(PF_INET, SOCK_STREAM, 0);
    if(connection_socket_descriptor < 0) {
-      //fprintf(stderr, "Błąd przy probie utworzenia gniazda.\n");
+      fprintf(stderr, "Błąd przy probie utworzenia gniazda.\n");
       return 0;
    }
 
@@ -46,11 +46,45 @@ int connect_to_server(const char *server_name, uint16_t port_number) {
    connect_result = connect(connection_socket_descriptor, (sockaddr *)&server_address, sizeof(struct sockaddr));
    if (connect_result < 0)
    {
-      //fprintf(stderr, "%s: Błąd przy próbie połączenia z serwerem (%s:%i).\n", argv[0], argv[1], atoi(argv[2]));
+       fprintf(stderr, "Błąd przy próbie połączenia z serwerem (%s:%i).\n", server_name, port_number);
        return 0;
    }
 
    return connection_socket_descriptor;
+}
+
+struct ClientState {
+    bool got_opponent_move;
+    v2_8 opponent_move;
+    bool got_room_id;
+    int32_t room_id;
+}
+
+static ClientState global_state;
+
+struct ClientThreadData {
+    int connection;
+    // TODO(piotr): 
+};
+
+void *client_thread(void *t_data) {
+    pthread_detach(pthread_self());
+    ClientThreadData *th_data = (ClientThreadData *)t_data;
+    int connection = th_data->connection;
+
+    bool done = false;
+    while(!done) {
+        Response r = {};
+        read(connection, &r, sizeof(Response));
+
+        switch(r.type) {
+            case RESPONSE_NEW_MOVE: {
+                assert(false && "site under construction");
+            } break;
+        }
+    }
+
+    pthread_exit(0);
 }
 
 struct ReadThreadData {
@@ -60,7 +94,7 @@ struct ReadThreadData {
     bool *finished;
 };
 
-void *thread_read_data(void *t_data) {
+void *read_thread(void *t_data) {
     pthread_detach(pthread_self());
     ReadThreadData *th_data = (ReadThreadData *)t_data;
     int connection = th_data->connection;
@@ -82,7 +116,7 @@ void read_async(int connection, void *buffer, int size, bool *finished) {
     t_data->buffer     = buffer;
     t_data->size       = size;
     t_data->finished   = finished;
-    pthread_create(&thread, 0, thread_read_data, (void *)t_data);
+    pthread_create(&thread, 0, read_thread, (void *)t_data);
 }
 
 inline bool is_inside(ImVec2 p, ImVec4 rect) {
@@ -170,8 +204,6 @@ void draw_board_interactive_local(ImDrawList *dl, GameData *gd, ImVec2 p, float 
     draw_board_interact(dl, gd, p, dim);
 }
 
-static v2_8 opponent_move;
-static bool got_opponent_move;
 
 void draw_board_interactive_online(ImDrawList *dl, GameData *gd, ImVec2 p, float dim) {
     draw_board(dl, &gd->board, p, dim);
@@ -181,8 +213,6 @@ void draw_board_interactive_online(ImDrawList *dl, GameData *gd, ImVec2 p, float
         if(made_move) {
             ready_to_make_move = false;
             send_last_move(gd);
-            read_async(server_connection, &opponent_move,
-                       sizeof(v2_8), &got_opponent_move);
         }
     } else {
         if(got_opponent_move) {
@@ -293,7 +323,8 @@ int main(int, char**) {
         ImGui::ShowDemoWindow(&show_demo_window);
 #endif
         // game window
-        {
+        static bool the_game_is_on = false;
+        if(the_game_is_on) {
             float dim = 500.f;
             ImGui::SetNextWindowPos(ImVec2(20, 20));
             ImGui::SetNextWindowSize(ImVec2(dim, dim+20.f));
@@ -325,8 +356,6 @@ int main(int, char**) {
                 server_connection = connect_to_server("127.0.0.1", 1234);
             }
 
-            static int32_t room_id = 0;
-            static bool got_room_id = false;
             if(ImGui::Button("Request new room")) {
                 Request r = {};
                 r.type = REQUEST_NEW_ROOM;
@@ -334,10 +363,18 @@ int main(int, char**) {
                 send_request_async(server_connection, r);
                 read_async(server_connection, &room_id, sizeof(int32_t), &got_room_id);
             }
+            static bool someone_joined = false;
             if(got_room_id && room_id != -1) {
                 got_room_id = false;
                 puts("got room id");
+                static int32_t trash;
+                read_async(server_connection, &trash, sizeof(int32_t), &someone_joined);
                 ready_to_make_move = true;
+            }
+            if(someone_joined) {
+                someone_joined = false;
+                puts("someone joined");
+                the_game_is_on = true;
             }
             ImGui::Text("Game id: %d", room_id);
 
@@ -348,10 +385,12 @@ int main(int, char**) {
                 r.type = REQUEST_JOIN_ROOM;
                 r.join_room.room_id = 0;
                 send_request_async(server_connection, r);
-                read_async(server_connection, &join_success, sizeof(int32_t), &got_join_success);
+                read_async(server_connection, &join_success,
+                           sizeof(int32_t), &got_join_success);
             }
             if(got_join_success && join_success) {
                 got_join_success = false;
+                the_game_is_on = true;
                 read_async(server_connection, &opponent_move,
                            sizeof(v2_8), &got_opponent_move);
             }

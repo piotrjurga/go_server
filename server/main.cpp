@@ -25,6 +25,7 @@ struct Room {
     GameData game;
     int32_t player_a;
     int32_t player_b;
+    char name[16];
 };
 
 int first_empty_slot(std::vector<Room> &vec) {
@@ -37,6 +38,7 @@ int first_empty_slot(std::vector<Room> &vec) {
     return i;
 }
 
+// TODO(piotr): move to a data structure for rooms better for multithreading?
 pthread_mutex_t rooms_mutex;
 static std::vector<Room> rooms;
 
@@ -125,13 +127,26 @@ void *handle_client(void *t_data) {
                 pthread_mutex_unlock(&rooms_mutex);
             } break;
 
-            case REQUEST_LIST_ROOMS: // TODO(piotr): 
-                assert(false && "got not handled REQUEST_LIST_ROOMS");
-            case REQUEST_NONE:
-            case REQUEST_EXIT:
-                puts("req exit"); //DEBUG
+            case REQUEST_LIST_ROOMS: {
+                pthread_mutex_lock(&rooms_mutex);
+/*
+                int size = rooms.size();
+                write(connection, &size, sizeof(int));
+                for(int i = 0; i < size; i++) {
+                    write(connection, &rooms[i].game.board, sizeof(board));
+                }
+*/
+                pthread_mutex_unlock(&rooms_mutex);
+            } break;
+
+            case REQUEST_NONE: {
+                printf("got request none from %d", connection);
                 done = true;
-                break;
+            } break;
+            case REQUEST_EXIT: {
+                printf("got reqest exit from %d", connection);
+                done = true;
+            } break;
 
             default: {
                 printf("received unrecognized request type %d\n", (int)r.type);
