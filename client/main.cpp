@@ -20,6 +20,43 @@
 #include <string.h>
 #include <unistd.h>
 
+#define print_bytes(p) print_bytes_size(p, sizeof(*p))
+void print_bytes_size(void *p, size_t size) {
+    for(uint32_t i = 0; i < size; i++) {
+        printf("%02x ", (int)(int8_t)*((int8_t *)p + i));
+    }
+    puts("");
+}
+
+struct ThreadSendRequestData {
+    int connection;
+    pthread_mutex_t *connection_mutex;
+    Request request;
+};
+
+void *thread_send_request(void *t_data) {
+    pthread_detach(pthread_self());
+    ThreadSendRequestData *th_data = (ThreadSendRequestData *)t_data;
+    pthread_mutex_lock(th_data->connection_mutex);
+    write_struct(th_data->connection, &th_data->request);
+    pthread_mutex_unlock(th_data->connection_mutex);
+    free(th_data);
+    pthread_exit(0);
+}
+
+void send_request_async(int connection, pthread_mutex_t *con_mutex, Request r) {
+    pthread_t thread;
+    ThreadSendRequestData *thread_data = (ThreadSendRequestData *)malloc(sizeof(ThreadSendRequestData));
+    thread_data->connection = connection;
+    thread_data->connection_mutex = con_mutex;
+    thread_data->request = r;
+    pthread_create(&thread, 0, thread_send_request, (void *)thread_data);
+}
+
+void send_request_async(Connection *con, Request r) {
+    send_request_async(con->desc, &con->mutex, r);
+}
+
 int connect_to_server(const char *server_name, uint16_t port_number) {
    int connection_socket_descriptor;
    int connect_result;
@@ -56,7 +93,7 @@ int connect_to_server(const char *server_name, uint16_t port_number) {
 static bool ready_to_make_move = false;
 
 struct ClientState {
-    int connection;
+    Connection connection;
     bool got_opponent_move;
     v2 opponent_move;
     bool got_room_id;
@@ -73,7 +110,8 @@ void *client_thread(void *t_data) {
     bool done = false;
     while(!done) {
         Response r = {};
-        read(cs->connection, &r, sizeof(Response));
+        int err = read_struct(cs->connection.desc, &r);
+        if(err) assert(false); // TODO(piotr):
 
         switch(r.type) {
             case RESPONSE_NEW_MOVE: {
@@ -103,6 +141,7 @@ void *client_thread(void *t_data) {
     pthread_exit(0);
 }
 
+#if 0
 struct ReadThreadData {
     int connection;
     void *buffer;
@@ -118,7 +157,8 @@ void *read_thread(void *t_data) {
     int size = th_data->size;
     bool *finished = th_data->finished;
 
-    read(connection, buffer, size);
+    int err = read_size(connection, buffer, size);
+    if(err) assert(false); // TODO(piotr):
     *finished = true;
 
     free(th_data);
@@ -134,18 +174,19 @@ void read_async(int connection, void *buffer, int size, bool *finished) {
     t_data->finished   = finished;
     pthread_create(&thread, 0, read_thread, (void *)t_data);
 }
+#endif
 
 inline bool is_inside(ImVec2 p, ImVec4 rect) {
     return p.x <= rect.z && p.x >= rect.x &&
            p.y <= rect.w && p.y >= rect.y;
 }
 
-void send_last_move(int connection, GameData *gd) {
+void send_last_move(Connection *con, GameData *gd) {
     Request r = {};
     r.type = REQUEST_MAKE_MOVE;
     int move_count = gd->log.move_count;
     r.make_move.move = gd->log.moves[move_count-1];
-    send_request_async(connection, r);
+    send_request_async(con, r);
 }
 
 void draw_board(ImDrawList *dl, Board *board, ImVec2 p, float dim) {
@@ -225,7 +266,7 @@ void draw_board_interactive_online(ClientState *cs, ImDrawList *dl, GameData *gd
         bool made_move = draw_board_interact(dl, gd, p, dim);
         if(made_move) {
             ready_to_make_move = false;
-            send_last_move(cs->connection, gd);
+            send_last_move(&cs->connection, gd);
         }
     } else {
         if(cs->got_opponent_move) {
@@ -362,13 +403,13 @@ int main(int, char**) {
         // server interaction debug window
         {
             ImGui::Begin("Server");
-            ImGui::Text("connection: %x", cs.connection);
+            ImGui::Text("connection descriptor: %x", cs.connection.desc);
             static char server_address[16] = "localhost";
             static char server_port[8] = "1234";
             ImGui::InputText("server address", server_address, 16);
             ImGui::InputText("server port", server_port, 8);
             if(ImGui::Button("Connect")) {
-                cs.connection = connect_to_server(server_address, atoi(server_port));
+                cs.connection.desc = connect_to_server(server_address, atoi(server_port));
                 pthread_t thread;
                 pthread_create(&thread, 0, client_thread, (void *)&cs);
             }
@@ -377,7 +418,7 @@ int main(int, char**) {
                 Request r = {};
                 r.type = REQUEST_NEW_ROOM;
                 r.new_room.board_size = 9;
-                send_request_async(cs.connection, r);
+                send_request_async(&cs.connection, r);
             }
             if(cs.got_room_id && cs.room_id != -1) {
                 cs.got_room_id = false;
@@ -397,7 +438,7 @@ int main(int, char**) {
                 Request r = {};
                 r.type = REQUEST_JOIN_ROOM;
                 r.join_room.room_id = atoi(room_id_buffer);
-                send_request_async(cs.connection, r);
+                send_request_async(&cs.connection, r);
             }
             if(cs.got_join_result && cs.join_result) {
                 cs.got_join_result = false;

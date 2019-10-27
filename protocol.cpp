@@ -1,31 +1,30 @@
 #include "protocol.h"
 
-void send_request(int connection, Request r) {
-    write(connection, &r, sizeof(Request));
+int read_size(int connection, void *data, size_t size) {
+    size_t bytes_read = 0;
+    while(bytes_read < size) {
+        int bytes = read(connection, data, size - bytes_read);
+        if(bytes == -1 || bytes == 0) return -1;
+        bytes_read += (size_t)bytes;
+    }
+    return 0;
 }
 
-struct ThreadData {
-    int connection;
-    Request request;
-};
-
-void *thread_send_request(void *t_data) {
-    pthread_detach(pthread_self());
-    ThreadData *th_data = (ThreadData *)t_data;
-    write(th_data->connection, &th_data->request, sizeof(Request));
-    free(th_data);
-    pthread_exit(0);
+int write_size(int connection, void *data, size_t size) {
+    size_t bytes_written = 0;
+    while(bytes_written < size) {
+        int bytes = write(connection, data, size - bytes_written);
+        if(bytes == -1) return -1;
+        bytes_written += (size_t)bytes;
+    }
+    return 0;
 }
 
-void send_request_async(int connection, Request r) {
-    pthread_t thread;
-    ThreadData *thread_data = (ThreadData *)malloc(sizeof(ThreadData));
-    thread_data->connection = connection;
-    thread_data->request = r;
-    pthread_create(&thread, 0, thread_send_request, (void *)thread_data);
-}
-
-
-void send_response(int connection, Response r) {
-    write(connection, &r, sizeof(Response));
+int write_size(Connection *connection, void *data, size_t size) {
+    puts("writing size");
+    pthread_mutex_lock(&connection->mutex);
+    int res = write_size(connection->desc, data, size);
+    pthread_mutex_unlock(&connection->mutex);
+    puts("written size");
+    return res;
 }

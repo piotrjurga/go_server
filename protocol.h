@@ -2,7 +2,13 @@
 
 #include <stdint.h>
 #include <unistd.h>
+#include <pthread.h>
 #include "game_logic.h"
+
+struct Connection {
+    int desc;
+    pthread_mutex_t mutex;
+};
 
 enum RequestType {
     REQUEST_NONE,
@@ -35,9 +41,6 @@ struct Request {
     };
 };
 
-void send_request(int connection, Request r);
-void send_request_async(int connection, Request r);
-
 enum ResponseType {
     RESPONSE_NONE,
     RESPONSE_NEW_MOVE,
@@ -67,3 +70,10 @@ struct Response {
         ResponseJoinResult join_result;
     };
 };
+
+#define read_struct(connection, buf) read_size(connection, (void *)buf, sizeof(*buf))
+int read_size(int connection, void *data, size_t size);
+
+#define write_struct(connection, data) write_size(connection, (void *)data, sizeof(*data))
+int write_size(int connection, void *data, size_t size);
+int write_size(Connection *connection, void *data, size_t size);
