@@ -21,10 +21,8 @@ int write_size(int connection, void *data, size_t size) {
 }
 
 int write_size(Connection *connection, void *data, size_t size) {
-    puts("writing size");
     pthread_mutex_lock(&connection->mutex);
     int res = write_size(connection->desc, data, size);
     pthread_mutex_unlock(&connection->mutex);
-    puts("written size");
     return res;
 }
