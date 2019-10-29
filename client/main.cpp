@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
 
 #define print_bytes(p) print_bytes_size(p, sizeof(*p))
 void print_bytes_size(void *p, size_t size) {
@@ -111,7 +112,10 @@ void *client_thread(void *t_data) {
     while(!done) {
         Response r = {};
         int err = read_struct(cs->connection.desc, &r);
-        if(err) assert(false); // TODO(piotr):
+        if(err) {
+            printf("error reading server response: %s\n", strerror(errno));
+            assert(false);
+        }
 
         switch(r.type) {
             case RESPONSE_NEW_MOVE: {
@@ -420,7 +424,7 @@ int main(int, char**) {
                 r.new_room.board_size = 9;
                 send_request_async(&cs.connection, r);
             }
-            if(cs.got_room_id && cs.room_id != -1) {
+            if(cs.got_room_id && cs.room_id != 0) {
                 cs.got_room_id = false;
                 puts("got room id");
                 ready_to_make_move = true;

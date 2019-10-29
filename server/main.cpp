@@ -14,12 +14,89 @@
 #include <pthread.h>
 #include <assert.h>
 #include <vector>
+#include <sys/mman.h>
 
 #include "game_logic.h"
 #include "protocol.h"
 
+#define Kilobytes(x) (1024*(x))
+#define Megabytes(x) (1024*Kilobytes(x))
+#define Gigabytes(x) (1024*Megabytes(x))
+
 #define SERVER_PORT 1234
 #define QUEUE_SIZE 5
+
+template <class T>
+struct SyncDynamicArray {
+    size_t size;
+    size_t allocated;
+    T *data;
+    pthread_mutex_t mutex;
+
+    SyncDynamicArray() {
+        size = 0;
+        allocated = 0;
+        data = (T *)mmap(0, Gigabytes(4l), PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if(data == (T *)-1) {
+            printf("%s\n", strerror(errno));
+            exit(1);
+        }
+    }
+
+    T& operator[](uint64_t i) { return data[i]; }
+    T& operator[](int i)      { return data[i]; }
+
+
+    int push_no_lock(T el) {
+        while(allocated <= (size+1)*sizeof(T)) {
+            allocated += Kilobytes(4);
+            int err = mprotect(data, allocated, PROT_READ | PROT_WRITE);
+            if(err) {
+                printf("%s\n", strerror(errno));
+                assert(false);
+            }
+        }
+        data[size] = el;
+        size += 1;
+        return (int)size-1;
+    }
+
+    int push(T el) {
+        pthread_mutex_lock(&mutex);
+        int index = push_no_lock(el);
+        pthread_mutex_unlock(&mutex);
+        return index;
+    }
+
+    T pop_no_lock() {
+        T res = data[--size];
+        memset((void *)&data[size], 0, sizeof(T));
+
+        if(allocated >= size*sizeof(T) + Kilobytes(8)) {
+            int err = mprotect(data, allocated, PROT_NONE);
+            if(err) {
+                printf("Error in mprotect: %s\n", strerror(errno));
+                assert(false);
+            }
+            allocated -= Kilobytes(4);
+            err = mprotect(data, allocated, PROT_READ | PROT_WRITE);
+            if(err) {
+                printf("Error in mprotect: %s\n", strerror(errno));
+                assert(false);
+            }
+        }
+
+        return res;
+    }
+
+    T pop() {
+        pthread_mutex_lock(&mutex);
+        T res = pop_no_lock();
+        pthread_mutex_unlock(&mutex);
+        return res;
+    }
+};
+
 
 struct Room {
     GameData game;
@@ -28,46 +105,60 @@ struct Room {
     char name[16];
 };
 
-int first_empty_slot(std::vector<Room> &vec) {
-    int i = 0;
-    for(; i < (int)vec.size(); i++) {
-        if(vec[i].player_a == 0)
+// first valid room index is 1
+static SyncDynamicArray<Room> rooms;
+// first valid client index is 1
+static SyncDynamicArray<Connection> clients;
+
+int first_empty_slot(SyncDynamicArray<Room> &arr) {
+    uint64_t i = 0;
+    for(; i < arr.size; i++) {
+        if(arr[i].player_a == 0)
             return i;
     }
-    vec.resize(vec.size()+1);
+    Room fill = {};
+    arr.push(fill);
     return i;
 }
 
-// TODO(piotr): move to a data structure for rooms better for multithreading?
-pthread_mutex_t rooms_mutex;
-static std::vector<Room> rooms;
+int first_empty_slot(SyncDynamicArray<Connection> &arr) {
+    uint64_t i = 0;
+    for(; i < arr.size; i++) {
+        if(arr[i].desc == 0)
+            return i;
+    }
+    Connection fill = {};
+    arr.push(fill);
+    return i;
+}
 
 struct ThreadData {
-    int connection;
+    int client_index;
 };
 
 void *handle_client(void *t_data) {
     pthread_detach(pthread_self());
     ThreadData *th_data = (ThreadData *)t_data;
-    int connection = th_data->connection;
-    printf("starting thread for %d\n", connection);
+    int client_index = th_data->client_index;
+    Connection *connection = &clients[client_index];
+    printf("starting thread for %d\n", client_index);
 
-    int32_t active_room_id = -1;
+    int32_t active_room_id = 0;
 
     bool done = false;
     while(!done) {
         Request r = {};
         Response res = {};
-        int err = read_struct(connection, &r);
+        int err = read_struct(connection->desc, &r);
         if(err) goto drop_connection;
         switch(r.type) {
             case REQUEST_NEW_ROOM: {
-                printf("requested new room by connection %d\n", connection);
-                int32_t new_room_id = -1;
+                printf("requested new room by connection %d\n", client_index);
+                int32_t new_room_id = 0;
                 int board_size = r.new_room.board_size;
                 res.type = RESPONSE_NEW_ROOM_RESULT;
-                if(active_room_id != -1 || board_size < 2 || board_size > 19) {
-                    res.new_room_result.room_id = -1;
+                if(active_room_id != 0 || board_size < 2 || board_size > 19) {
+                    res.new_room_result.room_id = 0;
                     int err = write_struct(connection, &res);
                     if(err) goto drop_connection;
                     break;
@@ -75,13 +166,11 @@ void *handle_client(void *t_data) {
 
                 Room new_room = {};
                 new_room.game.board.size = board_size;
-                new_room.player_a = connection;
+                new_room.player_a = client_index;
 
-                pthread_mutex_lock(&rooms_mutex);
                 new_room_id = first_empty_slot(rooms);
                 active_room_id = new_room_id;
                 rooms[new_room_id] = new_room;
-                pthread_mutex_unlock(&rooms_mutex);
 
                 res.new_room_result.room_id = new_room_id;
                 int err = write_struct(connection, &res);
@@ -92,27 +181,24 @@ void *handle_client(void *t_data) {
             case REQUEST_JOIN_ROOM: {
                 res.type = RESPONSE_JOIN_RESULT;
                 int32_t room_id = r.join_room.room_id;
-                printf("reqested join id %d by connection %d\n", room_id, connection);
+                printf("reqested join id %d by connection %d\n", room_id, client_index);
 
                 res.join_result.success = false;
-                if(active_room_id != -1) {
+                if(active_room_id != 0) {
                     int err = write_struct(connection, &res);
                     if(err) goto drop_connection;
                     break;
                 }
 
-                pthread_mutex_lock(&rooms_mutex);
-                if(room_id < 0 || room_id >= (int32_t)rooms.size() || rooms[room_id].player_b != 0) {
+                if(room_id < 0 || room_id >= (int32_t)rooms.size || rooms[room_id].player_b != 0) {
                     int err = write_struct(connection, &res);
-                    pthread_mutex_unlock(&rooms_mutex);
                     if(err) goto drop_connection;
                     break;
                 }
 
-                rooms[room_id].player_b = connection;
+                rooms[room_id].player_b = client_index;
                 int other_player = rooms[room_id].player_a;
                 active_room_id = room_id;
-                pthread_mutex_unlock(&rooms_mutex);
 
                 res.join_result.success = true;
                 int err = write_struct(connection, &res);
@@ -120,8 +206,7 @@ void *handle_client(void *t_data) {
 
                 Response res2 = {};
                 res2.type = RESPONSE_PLAYER_JOINED;
-                // TODO(piotr): put a mutex on every connection?
-                err = write_struct(other_player, &res2);
+                err = write_struct(&clients[other_player], &res2);
                 if(err) goto drop_connection;
                 puts("join success");
              } break;
@@ -129,16 +214,14 @@ void *handle_client(void *t_data) {
             case REQUEST_MAKE_MOVE: {
                 v2_8 move = r.make_move.move;
                 int x = (int)move.x, y = (int)move.y;
-                printf("reqested make move (%d, %d) by connection %d\n", x, y, connection);
-                pthread_mutex_lock(&rooms_mutex);
+                printf("reqested make move (%d, %d) by connection %d\n", x, y, client_index);
                 bool result = rooms[active_room_id].game.maybe_make_move(x, y);
                 // TODO(piotr): handle this error
                 assert(result && "illegal move in REQUEST_MAKE_MOVE");
 
                 int other_player = rooms[active_room_id].player_a;
-                if(other_player == connection)
+                if(other_player == client_index)
                     other_player = rooms[active_room_id].player_b;
-                pthread_mutex_unlock(&rooms_mutex);
                 // TODO(piotr): broadcast this message to everyone
                 // watching the game
                 printf("sending move to player %d\n", other_player);
@@ -147,12 +230,11 @@ void *handle_client(void *t_data) {
                 res.new_move.move.x = x;
                 res.new_move.move.y = y;
 
-                int err = write_struct(other_player, &res);
+                int err = write_struct(clients[other_player].desc, &res);
                 if(err) goto drop_connection;
             } break;
 
             case REQUEST_LIST_ROOMS: {
-                pthread_mutex_lock(&rooms_mutex);
 /*
                 int size = rooms.size();
                 int err = write_struct(connection, &size);
@@ -162,15 +244,14 @@ void *handle_client(void *t_data) {
                     if(err) goto drop_connection;
                 }
 */
-                pthread_mutex_unlock(&rooms_mutex);
             } break;
 
             case REQUEST_NONE: {
-                printf("got request none from %d\n", connection);
+                printf("got request none from %d\n", client_index);
                 done = true;
             } break;
             case REQUEST_EXIT: {
-                printf("got reqest exit from %d\n", connection);
+                printf("got reqest exit from %d\n", client_index);
                 done = true;
             } break;
 
@@ -180,7 +261,7 @@ void *handle_client(void *t_data) {
         }
     }
 drop_connection:
-    printf("ending thread for %d\n", connection);
+    printf("ending thread for %d\n", connection->desc);
     free(th_data);
     pthread_exit(0);
 }
@@ -190,8 +271,12 @@ void handle_connection(int connection_socket_descriptor) {
 
     pthread_t thread1;
 
+    Connection c = {};
+    c.desc = connection_socket_descriptor;
+    int client_index = clients.push(c);
+
     ThreadData *t_data = (ThreadData *)malloc(sizeof(ThreadData));
-    t_data->connection = connection_socket_descriptor;
+    t_data->client_index = client_index;
 
     create_result = pthread_create(&thread1, NULL, handle_client, (void *)t_data);
     if (create_result) {
@@ -201,7 +286,12 @@ void handle_connection(int connection_socket_descriptor) {
 }
 
 int main(int argc, char **argv) {
-    rooms_mutex = PTHREAD_MUTEX_INITIALIZER;
+    Connection invalid_connection = {};
+    invalid_connection.desc = -1;
+    clients.push(invalid_connection);
+    Room invalid_room = {};
+    invalid_room.player_a = -1;
+    rooms.push(invalid_room);
 
     int server_socket_descriptor;
     int connection_socket_descriptor;
@@ -247,6 +337,5 @@ int main(int argc, char **argv) {
     }
 
     close(server_socket_descriptor);
-    pthread_mutex_destroy(&rooms_mutex);
     return(0);
 }
