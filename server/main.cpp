@@ -156,6 +156,7 @@ void *handle_client(void *t_data) {
                 printf("requested new room by connection %d\n", client_index);
                 int32_t new_room_id = 0;
                 int board_size = r.new_room.board_size;
+                printf("requested board size %d\n", board_size);
                 res.type = RESPONSE_NEW_ROOM_RESULT;
                 if(active_room_id != 0 || board_size < 2 || board_size > 19) {
                     res.new_room_result.room_id = 0;
@@ -167,6 +168,7 @@ void *handle_client(void *t_data) {
                 Room new_room = {};
                 new_room.game.board.size = board_size;
                 new_room.player_a = client_index;
+                memcpy(new_room.name, r.new_room.name, 16);
 
                 new_room_id = first_empty_slot(rooms);
                 active_room_id = new_room_id;
@@ -235,15 +237,31 @@ void *handle_client(void *t_data) {
             } break;
 
             case REQUEST_LIST_ROOMS: {
-/*
-                int size = rooms.size();
-                int err = write_struct(connection, &size);
+                printf("got request list rooms from %d\n", client_index);
+                pthread_mutex_lock(&rooms.mutex);
+                pthread_mutex_lock(&connection->mutex);
+                res.type = RESPONSE_LIST_ROOMS;
+                int valid_room_count = 0;
+                for(int i = 1; i < rooms.size; i++)
+                    if(rooms[i].player_a)
+                        valid_room_count++;
+                res.list_rooms.size = valid_room_count;
+                int err = write_struct(connection->desc, &res);
                 if(err) goto drop_connection;
-                for(int i = 0; i < size; i++) {
-                    int err = write_struct(connection, &rooms[i].game.board);
+                for(int i = 1; i < rooms.size; i++) {
+                    if(rooms[i].player_a == 0) continue;
+                    int err = write_struct(connection->desc, &i);
+                    if(err) goto drop_connection;
+                    err = write_size(connection->desc, rooms[i].name, 16);
+                    if(err) goto drop_connection;
+                    bool can_join = (rooms[i].player_b == 0);
+                    err = write_struct(connection->desc, &can_join);
+                    if(err) goto drop_connection;
+                    err = write_struct(connection->desc, &rooms[i].game.board);
                     if(err) goto drop_connection;
                 }
-*/
+                pthread_mutex_unlock(&connection->mutex);
+                pthread_mutex_unlock(&rooms.mutex);
             } break;
 
             case REQUEST_NONE: {

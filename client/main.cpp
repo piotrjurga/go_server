@@ -102,6 +102,11 @@ struct ClientState {
     bool got_join_result;
     bool join_result;
     bool player_joined;
+    bool got_game_list;
+    std::vector<int> room_ids;
+    std::vector<std::string> names;
+    std::vector<bool> can_join;
+    std::vector<Board> games;
 };
 
 void *client_thread(void *t_data) {
@@ -134,6 +139,28 @@ void *client_thread(void *t_data) {
             } break;
             case RESPONSE_PLAYER_JOINED: {
                 cs->player_joined = true;
+            } break;
+            case RESPONSE_LIST_ROOMS: {
+                int size = r.list_rooms.size;
+                cs->names.clear();
+                cs->can_join.resize(size);
+                cs->games.resize(size);
+                cs->room_ids.resize(size);
+                printf("reading %d rooms...\n", size);
+                for(int i = 0; i < size; i++) {
+                    int id = 0;
+                    read_struct(cs->connection.desc, &id);
+                    cs->room_ids[i] = id;
+                    char name[16] = {};
+                    read_size(cs->connection.desc, name, 16);
+                    cs->names.push_back(name);
+                    bool can_join = false;
+                    read_struct(cs->connection.desc, &can_join);
+                    cs->can_join[i] = can_join;
+                    read_struct(cs->connection.desc, &cs->games[i]);
+                    printf("room %d:\n\tname: %s\ncan_join: %d\n", i, name, (int)can_join);
+                }
+                cs->got_game_list = true;
             } break;
             case RESPONSE_NONE: {
                 puts("got response none!");
@@ -342,24 +369,10 @@ int main(int, char**) {
     ImGui_ImplSDL2_InitForOpenGL(window, gl_context);
     ImGui_ImplOpenGL3_Init(glsl_version);
 
-    // Load Fonts
-    // - If no fonts are loaded, dear imgui will use the default font. You can also load multiple fonts and use ImGui::PushFont()/PopFont() to select them.
-    // - AddFontFromFileTTF() will return the ImFont* so you can store it if you need to select the font among multiple.
-    // - If the file cannot be loaded, the function will return NULL. Please handle those errors in your application (e.g. use an assertion, or display an error and quit).
-    // - The fonts will be rasterized at a given size (w/ oversampling) and stored into a texture when calling ImFontAtlas::Build()/GetTexDataAsXXXX(), which ImGui_ImplXXXX_NewFrame below will call.
-    // - Read 'misc/fonts/README.txt' for more instructions and details.
-    // - Remember that in C/C++ if you want to include a backslash \ in a string literal you need to write a double backslash \\ !
-    //io.Fonts->AddFontDefault();
-    //io.Fonts->AddFontFromFileTTF("../../misc/fonts/Roboto-Medium.ttf", 16.0f);
-    //io.Fonts->AddFontFromFileTTF("../../misc/fonts/Cousine-Regular.ttf", 15.0f);
-    //io.Fonts->AddFontFromFileTTF("../../misc/fonts/DroidSans.ttf", 16.0f);
-    //io.Fonts->AddFontFromFileTTF("../../misc/fonts/ProggyTiny.ttf", 10.0f);
-    //ImFont* font = io.Fonts->AddFontFromFileTTF("c:\\Windows\\Fonts\\ArialUni.ttf", 18.0f, NULL, io.Fonts->GetGlyphRangesJapanese());
-    //IM_ASSERT(font != NULL);
-
     // Our state
     ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
     ClientState cs = {};
+    GameData    gd = {}; // current game
 
     // Main loop
     bool done = false;
@@ -384,10 +397,6 @@ int main(int, char**) {
         // game window
         static bool the_game_is_on = false;
         if(the_game_is_on) {
-            float dim = 500.f;
-            //ImGui::SetNextWindowPos(ImVec2(20, 20));
-            //ImGui::SetNextWindowSize(ImVec2(dim, dim+20.f));
-
             ImGui::Begin("Game");
 
             ImDrawList* draw_list = ImGui::GetWindowDrawList();
@@ -395,12 +404,38 @@ int main(int, char**) {
             p.x -= 10.f;
             p.y -= 10.f;
 
-            static GameData gd = {};
-            if(!gd.board.size) {
-                gd.board.size = 9;
-            }
+            float dim = 500.f;
             draw_board_interactive_online(&cs, draw_list, &gd, p, dim);
 
+            ImGui::End();
+        }
+
+        static bool show_game_list = false;
+        if(show_game_list) {
+            ImGui::SetNextWindowSize(ImVec2(220, 500));
+            ImGui::Begin("Rooms list", &show_game_list, 0);
+            ImDrawList* draw_list = ImGui::GetWindowDrawList();
+            for(int i = 0; i < (int)cs.games.size(); i++) {
+                ImGui::Text("Name: %s", cs.names[i].c_str());
+                if(cs.can_join[i]) {
+                    ImGui::SameLine(170.f);
+                    char button_id[16] = {};
+                    sprintf(button_id, "Join###%d", i);
+                    if(ImGui::Button(button_id)) {
+                        printf("requesting join %d\n", cs.room_ids[i]);
+                        gd.board.size = cs.games[i].size;
+                        Request r = {};
+                        r.type = REQUEST_JOIN_ROOM;
+                        r.join_room.room_id = cs.room_ids[i];
+                        send_request_async(&cs.connection, r);
+                        show_game_list = false;
+                    }
+                }
+                ImVec2 p = ImGui::GetCursorScreenPos();
+                draw_board(draw_list, &cs.games[i], p, 200.f);
+                p.y += 230.f;
+                ImGui::SetCursorScreenPos(p);
+            }
             ImGui::End();
         }
 
@@ -409,19 +444,36 @@ int main(int, char**) {
             ImGui::Begin("Server");
             ImGui::Text("connection descriptor: %x", cs.connection.desc);
             static char server_address[16] = "localhost";
-            static char server_port[8] = "1234";
+            static int server_port = 1234;
             ImGui::InputText("server address", server_address, 16);
-            ImGui::InputText("server port", server_port, 8);
+            ImGui::InputInt("server port", &server_port);
             if(ImGui::Button("Connect")) {
-                cs.connection.desc = connect_to_server(server_address, atoi(server_port));
+                cs.connection.desc = connect_to_server(server_address, (uint16_t)server_port);
                 pthread_t thread;
                 pthread_create(&thread, 0, client_thread, (void *)&cs);
             }
 
+            if(ImGui::Button("List rooms")) {
+                Request r = {};
+                r.type = REQUEST_LIST_ROOMS;
+                send_request_async(&cs.connection, r);
+            }
+            if(cs.got_game_list) {
+                cs.got_game_list = false;
+                show_game_list = true;
+            }
+
+            static char room_name[16] = "";
+            ImGui::InputText("room name", room_name, 16);
+            static int board_size = 9;
+            ImGui::InputInt("board size", &board_size);
             if(ImGui::Button("Request new room")) {
                 Request r = {};
                 r.type = REQUEST_NEW_ROOM;
-                r.new_room.board_size = 9;
+                r.new_room.board_size = board_size;
+                gd.board.size = board_size;
+                printf("requested board size %d\n", board_size);
+                memcpy(&r.new_room.name, room_name, 16);
                 send_request_async(&cs.connection, r);
             }
             if(cs.got_room_id && cs.room_id != 0) {
@@ -436,6 +488,7 @@ int main(int, char**) {
             }
             ImGui::Text("Game id: %d", cs.room_id);
 
+#if 0
             static char room_id_buffer[4];
             ImGui::InputText("requested room id", room_id_buffer, 4);
             if(ImGui::Button("Request join room")) {
@@ -444,11 +497,11 @@ int main(int, char**) {
                 r.join_room.room_id = atoi(room_id_buffer);
                 send_request_async(&cs.connection, r);
             }
+#endif
             if(cs.got_join_result && cs.join_result) {
                 cs.got_join_result = false;
                 the_game_is_on = true;
             }
-            ImGui::Text("Join success: %d", cs.join_result);
             ImGui::End();
         }
 

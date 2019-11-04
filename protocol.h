@@ -32,6 +32,7 @@ struct RequestMakeMove {
     v2_8 move;
 };
 
+
 struct Request {
     RequestType type;
     union {
@@ -47,6 +48,7 @@ enum ResponseType {
     RESPONSE_NEW_ROOM_RESULT,
     RESPONSE_JOIN_RESULT,
     RESPONSE_PLAYER_JOINED,
+    RESPONSE_LIST_ROOMS,
 };
 
 struct ResponseNewMove {
@@ -62,12 +64,17 @@ struct ResponseJoinResult {
     bool success;
 };
 
+struct ResponseListRooms {
+    int32_t size;
+};
+
 struct Response {
     ResponseType type;
     union {
         ResponseNewMove new_move;
         ResponseNewRoomResult new_room_result;
         ResponseJoinResult join_result;
+        ResponseListRooms list_rooms;
     };
 };
 
