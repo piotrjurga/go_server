@@ -104,9 +104,9 @@ struct ClientState {
     bool player_joined;
     bool got_game_list;
     bool other_player_left;
-    bool update_game_data;
     bool connection_lost;
-    GameData game_data;
+    bool update_game_data;
+    GameData game_data; //the data sent by server to update local game data
 
     std::vector<int> room_ids;
     std::vector<std::string> names;
@@ -379,6 +379,25 @@ int main(int, char**) {
         static bool the_game_is_on = false;
         if(the_game_is_on) {
             ImGui::Begin("Game");
+            bool pass = ImGui::Button("Pass");
+            ImGui::SameLine();
+            bool resign = ImGui::Button("Resign");
+
+            if(pass && cs.ready_to_make_move) {
+                bool made_move = gd.pass();
+                if(made_move) {
+                    cs.ready_to_make_move = false;
+                    send_last_move(&cs.connection, &gd);
+                }
+            }
+            if(resign && cs.ready_to_make_move) {
+                bool made_move = gd.resign();
+                if(made_move) {
+                    cs.ready_to_make_move = false;
+                    send_last_move(&cs.connection, &gd);
+                }
+            }
+
 
             ImDrawList* draw_list = ImGui::GetWindowDrawList();
             ImVec2 p = ImGui::GetCursorScreenPos();
@@ -387,6 +406,31 @@ int main(int, char**) {
 
             float dim = 500.f;
             draw_board_interactive_online(&cs, draw_list, &gd, p, dim);
+
+            
+            float black_points = 0;
+            float white_points = 0;
+            auto w = gd.winner(&black_points, &white_points);
+            if(w) ImGui::OpenPopup("Game finished");
+            if(ImGui::BeginPopupModal("Game finished", 0, ImGuiWindowFlags_AlwaysAutoResize)) {
+                cs.ready_to_make_move = false;
+                ImGui::Text("%s player won!", (w == STONE_WHITE) ? "White" : "Black");
+                ImGui::Text("Black: %g points", black_points);
+                ImGui::Text("White: %g points", white_points);
+                if(ImGui::Button("Close")) {
+                    the_game_is_on = false;
+                    gd = {};
+                    auto con = cs.connection;
+                    cs = {};
+                    cs.connection = con;
+                    Request r = {};
+                    r.type = REQUEST_LEAVE_ROOM;
+                    send_request_async(&cs.connection, r);
+                    ImGui::CloseCurrentPopup();
+                }
+
+                ImGui::EndPopup();
+            }
 
             ImGui::End();
         }
@@ -420,7 +464,7 @@ int main(int, char**) {
             ImGui::End();
         }
 
-        // server interaction debug window
+        // server interaction window
         {
             ImGui::Begin("Server");
             ImGui::Text("connection descriptor: %x", cs.connection.desc);
@@ -462,9 +506,9 @@ int main(int, char**) {
             if(cs.got_room_id && cs.room_id != 0) {
                 cs.got_room_id = false;
                 puts("got room id");
-                ImGui::OpenPopup("waiting for join");
+                ImGui::OpenPopup("Waiting for join");
             }
-            if(ImGui::BeginPopupModal("waiting for join", 0, ImGuiWindowFlags_AlwaysAutoResize)) {
+            if(ImGui::BeginPopupModal("Waiting for join", 0, ImGuiWindowFlags_AlwaysAutoResize)) {
                 ImGui::Text("Waiting for the other player to join.");
                 if(cs.player_joined) {
                     cs.player_joined = false;

@@ -25,8 +25,10 @@ struct Board {
 
     Stone stone(int i, int j);
     void set(int i, int j, Stone s);
-    std::vector<v2> get_group(int x, int y);
+    std::vector<v2> get_group(int i, int j);
     int count_liberties(std::vector<v2> group);
+    void count_region(int i, int j, bool visited[19][19],
+                      float *black_points, float *white_points);
 };
 
 struct MoveLog {
@@ -52,6 +54,9 @@ struct GameData {
 
     bool active_player();
     bool maybe_make_move(int i, int j);
+    bool pass();
+    bool resign();
+    Stone winner(float *black_points = 0, float *white_points = 0);
     void undo_move();
     void undo_move(int n);
     void redo_move();

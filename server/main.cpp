@@ -161,6 +161,14 @@ void *handle_client(void *t_data) {
         Response res = {};
         int err = read_struct(connection->desc, &req);
         if(err) { done = true; break; }
+
+        if(active_room_id && rooms[active_room_id].game.board.size == 0) {
+            // if the active game has no size the other player
+            // has left it and reset it's state
+            puts("leaving empty room");
+            active_room_id = 0;
+        }
+
         switch(req.type) {
             case REQUEST_NEW_ROOM: {
                 printf("requested new room by connection %d\n", client_index);
@@ -194,6 +202,7 @@ void *handle_client(void *t_data) {
                 res.type = RESPONSE_JOIN_RESULT;
                 int32_t room_id = req.join_room.room_id;
                 printf("reqested join id %d by connection %d\n", room_id, client_index);
+                printf("active room %d\n", active_room_id);
 
                 res.join_result.success = false;
                 if(active_room_id != 0) {
@@ -202,7 +211,7 @@ void *handle_client(void *t_data) {
                     break;
                 }
 
-                if(room_id < 0 || room_id >= (int32_t)rooms.size || rooms[room_id].player_b != 0) {
+                if(room_id <= 0 || room_id >= (int32_t)rooms.size || rooms[room_id].player_b != 0) {
                     int err = write_struct(connection, &res);
                     if(err) done = true;
                     break;
@@ -244,13 +253,6 @@ void *handle_client(void *t_data) {
                 v2_8 move = req.make_move.move;
                 int x = (int)move.x, y = (int)move.y;
                 printf("reqested make move (%d, %d) by connection %d\n", x, y, client_index);
-                if(rooms[active_room_id].game.board.size == 0) {
-                    // if the active game has no size, we know for sure
-                    // the other player has left it and reset it's state
-                    // so any further moves are impossible
-                    active_room_id = 0;
-                    break;
-                }
 
                 bool result = rooms[active_room_id].game.maybe_make_move(x, y);
                 if(!result) {
@@ -278,6 +280,13 @@ void *handle_client(void *t_data) {
 
                 err = write_struct(clients[other_player].desc, &res);
                 if(err) { done = true; break; }
+
+                auto w = rooms[active_room_id].game.winner();
+                if(w) {
+                    printf("game %d finished\n", active_room_id);
+                    rooms[active_room_id] = {};
+                    active_room_id = 0;
+                }
             } break;
 
             case REQUEST_LIST_ROOMS: {
